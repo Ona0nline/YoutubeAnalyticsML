@@ -41,12 +41,62 @@ def preprocess_content(data):
     data.drop(columns=["Content"], inplace=True)
     data.fillna(0, inplace=True)
     data["Estimated clicks"] = data["Impressions"] * (data["Impressions click-through rate (%)"] / 100)
+    data["Estimated clicks"] = data["Estimated clicks"].round().astype(int)
     data["Video publish time"] = pd.to_datetime(data["Video publish time"], errors="coerce")
     data["Average view duration (sec)"] = data["Average view duration"].apply(convert_duration_to_seconds) 
+
+    # Defining params for ctr
+    # Define threshold for high CTR (e.g., top 20%)
+    threshold = data["Impressions click-through rate (%)"].quantile(0.8)  # top 20%
+    data["High_CTR"] = (data["Impressions click-through rate (%)"] >= threshold).astype(int)
     return data
 
+cleaned_content_data = preprocess_content(content_data_frame)
+
+'''
+Question: Will this video have a high click through rate based off of the metrics providded?
+'''
+x = cleaned_content_data[["Video title", "Duration", "Estimated clicks", "Average view duration (sec)"]]
+y = cleaned_content_data["High_CTR"]
+
+x_train, y_train, x_test, y_test = train_test_split(x, y, test_size=0.35, random_state=42)
+
+scaler = MinMaxScaler()
+
+# This takes the training data
+x_train = scaler.fit_transform(x_train)
+x_test = scaler.transform(x_test)
+
+# Tuning the model
+def tune_model(x_train, y_train):
+
+    param_grid = {
+        "n_neighbors" : range(1,10),
+        "metric": ["euclidean", "manhattan", "minkowski"],
+        "weights": ["uniform", "distance"]
+    }
+
+    model = KNeighborsClassifier()
+    grid_search = GridSearchCV(model, param_grid, cv=5, n_jobs=-1)
+    return grid_search.best_estimator_
+
+best_model = tune_model(x_train, y_train)
+
+# Predictions + evaluation
+def evaluate_model(model, x_test, y_test):
+    prediction = model.predict(x_test)
+    accuracy = accuracy_score(y_test, prediction)
+    matrix = confusion_matrix(y_test, prediction)
+
+    return accuracy, matrix
+
+accuracy, matrix = evaluate_model(best_model, x_train, y_train)
 
 
 print(geography_data_frame.isnull().sum())
 # print(preprocess_geography(geography_data_frame))
 print(preprocess_content(content_data_frame))
+
+print(f'Accuracy: {accuracy * 100:.2f}%')
+print(f'Confusion Matrix:')
+print(matrix)
