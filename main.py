@@ -1,14 +1,3 @@
-'''
-Goal: I want to analyse youtube data and predict how future videos will perform based off of previous results.
-Need to answer questions: 
-1. On average at what point do most people exit my video? --> how long should my videos be?
-2. At what time in the day do I get the most interactions? --> What time should I typically post
-3. What is the duration of my videos vs the average view duration --> Again how long should my videos be?
-4. How often should I post?
-5. How does average view duration compare to total video length? --> Are your videos too long or too short?
-6. Which geography delivers the highest watch time? (Think I should start here, easiest)
-'''
-# Second goal: I want to generate recommendations/advise for future channel performance
 import pandas as pd
 import numpy as np
 
@@ -17,12 +6,9 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score, confusion_matrix
 
-# Data frame for geography
+# Load data
 geography_data_frame = pd.read_csv("analytics/geography/table.csv")
-geography_data_frame.info()
-
 content_data_frame = pd.read_csv("analytics/content/table.csv")
-content_data_frame.info()
 
 def convert_duration_to_seconds(x):
     if pd.isna(x):
@@ -30,73 +16,93 @@ def convert_duration_to_seconds(x):
     h, m, s = x.split(":")
     return int(h) * 3600 + int(m) * 60 + int(s)
 
-def preprocess_geography(data):
-    # Converting data types for minutes and then for Geography
-    # data = pd.get_dummies(geography_data_frame, columns=["Geography"], drop_first=True)
-    geography_data_frame["Average view duration (sec)"] = geography_data_frame["Average view duration"].apply(convert_duration_to_seconds)
-    # data.groupby("Geography")["Views"].sum().sort_values(ascending=False)
-    return geography_data_frame
-
 def preprocess_content(data):
-    data.drop(columns=["Content"], inplace=True)
     data.fillna(0, inplace=True)
-    data["Estimated clicks"] = data["Impressions"] * (data["Impressions click-through rate (%)"] / 100)
-    data["Estimated clicks"] = data["Estimated clicks"].round().astype(int)
+    data["Estimated clicks"] = (data["Impressions"] * (data["Impressions click-through rate (%)"] / 100)).round().astype(int)
     data["Video publish time"] = pd.to_datetime(data["Video publish time"], errors="coerce")
-    data["Average view duration (sec)"] = data["Average view duration"].apply(convert_duration_to_seconds) 
-
-    # Defining params for ctr
-    # Define threshold for high CTR (e.g., top 20%)
-    threshold = data["Impressions click-through rate (%)"].quantile(0.8)  # top 20%
+    data["Average view duration (sec)"] = data["Average view duration"].apply(convert_duration_to_seconds)
+    
+    # Define threshold for high CTR (top 20%)
+    threshold = data["Impressions click-through rate (%)"].quantile(0.8)
     data["High_CTR"] = (data["Impressions click-through rate (%)"] >= threshold).astype(int)
+    
     return data
 
+# Preprocess content
 cleaned_content_data = preprocess_content(content_data_frame)
 
-'''
-Question: Will this video have a high click through rate based off of the metrics providded?
-'''
-x = cleaned_content_data[["Video title", "Duration", "Estimated clicks", "Average view duration (sec)"]]
+# Features and target
+x = cleaned_content_data[["Duration", "Estimated clicks", "Average view duration (sec)"]]
 y = cleaned_content_data["High_CTR"]
 
-x_train, y_train, x_test, y_test = train_test_split(x, y, test_size=0.35, random_state=42)
+# Split and keep a DataFrame copy of x_test for later
+x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.35, random_state=42)
+x_test_df = x_test.copy()  # Keep as DataFrame for attaching predictions later
 
+# Scale numeric features
 scaler = MinMaxScaler()
+x_train_scaled = scaler.fit_transform(x_train)
+x_test_scaled = scaler.transform(x_test)
 
-# This takes the training data
-x_train = scaler.fit_transform(x_train)
-x_test = scaler.transform(x_test)
-
-# Tuning the model
+# Tune KNN model
 def tune_model(x_train, y_train):
-
     param_grid = {
-        "n_neighbors" : range(1,10),
+        "n_neighbors": range(1, 10),
         "metric": ["euclidean", "manhattan", "minkowski"],
         "weights": ["uniform", "distance"]
     }
-
     model = KNeighborsClassifier()
     grid_search = GridSearchCV(model, param_grid, cv=5, n_jobs=-1)
+    grid_search.fit(x_train, y_train)
     return grid_search.best_estimator_
 
-best_model = tune_model(x_train, y_train)
+best_model = tune_model(x_train_scaled, y_train)
 
-# Predictions + evaluation
+# Evaluate on training data
 def evaluate_model(model, x_test, y_test):
     prediction = model.predict(x_test)
     accuracy = accuracy_score(y_test, prediction)
     matrix = confusion_matrix(y_test, prediction)
-
     return accuracy, matrix
 
-accuracy, matrix = evaluate_model(best_model, x_train, y_train)
+accuracy, matrix = evaluate_model(best_model, x_train_scaled, y_train)
 
+# Predict on test set
+y_pred = best_model.predict(x_test_scaled)
 
-print(geography_data_frame.isnull().sum())
-# print(preprocess_geography(geography_data_frame))
-print(preprocess_content(content_data_frame))
+# Attach predictions and actual labels to test DataFrame
+x_test_df = x_test_df.copy()
+x_test_df['Actual_High_CTR'] = y_test.values  # align index
+x_test_df['Predicted_High_CTR'] = y_pred
 
-print(f'Accuracy: {accuracy * 100:.2f}%')
-print(f'Confusion Matrix:')
+# Merge Video title and publish time for context
+x_test_df = x_test_df.merge(
+    cleaned_content_data[["Video title", "Video publish time"]],
+    left_index=True, right_index=True
+)
+
+# Format durations for readability
+def format_duration(seconds):
+    if pd.isna(seconds):
+        return None
+    minutes = int(seconds // 60)
+    sec = int(seconds % 60)
+    return f"{minutes}m {sec}s"
+
+x_test_df["Duration_fmt"] = x_test_df["Duration"].apply(format_duration)
+x_test_df["Avg_view_duration_fmt"] = x_test_df["Average view duration (sec)"].apply(format_duration)
+
+# Filter predicted high CTR videos
+predicted_high_ctr_videos = x_test_df[x_test_df["Predicted_High_CTR"] == 1]
+
+# Select columns for display
+display_cols = ["Video title", "Video publish time", "Duration_fmt", "Avg_view_duration_fmt",
+                "Estimated clicks", "Actual_High_CTR", "Predicted_High_CTR"]
+
+print("Predicted High CTR Videos:")
+print(predicted_high_ctr_videos[display_cols])
+
+# Output model evaluation
+print(f"\nAccuracy: {accuracy * 100:.2f}%")
+print("Confusion Matrix:")
 print(matrix)
